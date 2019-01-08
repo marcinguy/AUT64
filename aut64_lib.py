@@ -1,5 +1,6 @@
 # Reference AUT64 implementation in python
 # C Hicks, hkscy.org, 03-01-19
+# M Kozlowski <marcinguy@gmail.com>, Added decrypt routine based on work from C Hicks  
 from __future__ import print_function
 import math
 import random
@@ -7,6 +8,7 @@ import os
 import copy
 from copy import deepcopy
 import itertools
+import pprint
 
 verbose = False
 
@@ -15,6 +17,7 @@ class bcolours:
     OKBLUE = '\033[94m'
     BOLD = '\033[1m'
     ENDC = '\033[0m'
+
 
 # Logarithm base 2
 def log2(n):
@@ -102,6 +105,42 @@ def print8bitBin(n):
 def print8bitBinPrefixed(prefix, n):    
     return str(prefix) + ' ' + print8bitBin(n)
 
+
+def decompress(enc, key_reg, roundN, verbose):
+    r5=0
+    r6=0
+
+    for byte in range(0, 7): # Compute over first 7 bytes
+        ln = enc[byte] & 0xf # get lower byte nibble
+        lk = key_reg[table_ln[8*roundN + byte]] # get key nibble
+        p0 = ln | ((lk << 4) & 0xf0) # combine state and key nibble   
+        r6 ^= table_offset[p0]
+
+        un = (enc[byte] >> 4) & 0xf
+        uk = key_reg[table_un[8*roundN + byte]] # get key nibble 
+        p1 = un | ((uk << 4) & 0xf0) # combine state and key nibble uk,un
+        r5 ^= table_offset[p1]
+    
+
+
+    lk = key_reg[table_ln[8*roundN + 7]] # get lower key nibble   
+    ls = (table_sub[lk] << 4)  & 0xf0    # Substitute and move lower into upper nibble
+    i_ln = (enc[7] ^ r6) & 0xf;
+    enc_ln = table_offset[ls + (i_ln)]
+
+
+    uk = key_reg[table_un[8*roundN + 7]] # get upper key nibble   
+    
+    us = (table_sub[uk] << 4)   & 0xf0 # Substitute and move lower into upper nibble
+    i_un = ((enc[7] >> 4) ^ r5) & 0xf;
+
+    enc_un = table_offset[us + (i_un)]
+     
+    result = ((enc_un << 4) & 0xf0) | (enc_ln & 0x0f) 
+    
+    return result
+    
+
 # AUT64 Compression function G
 # Inputs: state   - 64-bit bitstring round state
 #         key_reg - 32-bit bitstring compression function key k_G
@@ -124,13 +163,14 @@ def compress(state, key_reg, roundN, verbose):
         lk = key_reg[table_ln[8*roundN + byte]] # get key nibble
         p0 = ln | ((lk << 4) & 0xf0) # combine state and key nibble    
         r6 ^= table_offset[p0]
+ 
         
         ## upper nibble in byte ##
         un = (state[byte] >> 4) & 0xf # get upper byte nibble
         uk = key_reg[table_un[8*roundN + byte]] # get key nibble  
         p1 = un | ((uk << 4) & 0xf0) # combine state and key nibble uk,un
         r5 ^= table_offset[p1]
-        
+         
         if verbose:
             print ('\tbyte #: ' + str(byte), end='')
             print (print8bitBinPrefixed(' :', state[byte]))
@@ -146,6 +186,7 @@ def compress(state, key_reg, roundN, verbose):
             print (print8bitBinPrefixed(' p1:', p1),end='')
             print (print8bitBinPrefixed(' to:', table_offset[p1]),end='')
             print (print8bitBinPrefixed(' r5:', r5))
+
         
     ## Compute final byte (7)
     
@@ -153,6 +194,7 @@ def compress(state, key_reg, roundN, verbose):
     ln = state[7] & 0xf # get lower byte nibble
     lk = key_reg[table_ln[8*roundN + 7]] # get lower key nibble   
     ls = (table_sub[lk] << 4) & 0xf0    # Substitute and move lower into upper nibble
+    
 
     # Find index of ln in table_offset at ls+(0,1,2,...,15)
     for i_ln in range(0,16):
@@ -244,7 +286,6 @@ def apply_pbox_bitwise(input_data, pbox):
 #         verbose - Provide detailed operations
 # Returns: 64-bit AUT64 encryption as list of hex strings
 def encrypt(state, key_reg, pbox, sbox, nRounds, verbose):
-
     stateInternal = copy.deepcopy(state)
 
     for roundN in range(0,nRounds):
@@ -256,22 +297,36 @@ def encrypt(state, key_reg, pbox, sbox, nRounds, verbose):
         step4 = int( apply_sbox(step3, sbox) )
         stateInternal[7] = step4
 
-        if False:
-            print(hex(step1))
-            print(hex(step2))
-            print(hex(step3))
-            print(hex(step4))
-            print(stateInternal) 
-
     return stateInternal                   
+
+
+
+def decrypt(state, key_reg, pbox_inv, sbox_inv, nRounds, verbose):
+
+    stateInternal = copy.deepcopy(state)
+
+    for roundN in range(nRounds-1,-1,-1):
+ 
+      stateInternal[7] = int( apply_sbox(stateInternal[7], sbox_inv) )
+      stateInternal[7]= apply_pbox_bitwise(stateInternal[7], pbox_inv)
+      stateInternal[7]=  int( apply_sbox(stateInternal[7], sbox_inv))
+      stateInternal[7] = decompress(stateInternal,key_reg, roundN, verbose)  
+      stateInternal = apply_pbox(stateInternal, pbox_inv,1)
+
+    return stateInternal
+
 
 if __name__ == '__main__':
 
+
     # Some example key values
     pbox = [2, 0, 6, 5, 7, 4, 3, 1]
+    pbox_inv = [pbox.index(x) for x in xrange(len(pbox))]
+
     key_reg = [10, 8, 4, 14, 5, 4, 8, 11]
     sbox = [5, 11, 7, 12, 4, 8, 0, 3, 13, 9, 6, 1, 2, 14, 10, 15]
-    message = [0x1,0x2,0x3,0x4,0x5,0x6,0x7,0x8]
+    sbox_inv = [sbox.index(x) for x in xrange(len(sbox))]
+    message = [0x41,0x42,0x43,0x44,0x41,0x42,0x43,0x41]
     nRounds = 8
 
     # AUT64 encrypt
@@ -280,18 +335,8 @@ if __name__ == '__main__':
     print(['0x{:02x}'.format(m_) for m_ in message])
     print('Ciphert: ', end='')
     print(['0x{:02x}'.format(e_) for e_ in e])
-
-    # Generate and print some random encryptions
-    # Note: Unless you sanitise (cyclic only) the pbox values these will not look very random!
-    nRandEncryptions = 5
-    kRGen = key_reg_gen()
-    for _ in range(nRandEncryptions):
-        key_reg = next(key_reg_gen())
-        pbox = random_pbox()
-        sbox = random_sbox()
-        message = [random.randint(0,255) for _ in range(8)]
-        e = encrypt(message, key_reg, pbox, sbox, nRounds, verbose) 
-        print('Message: ', end='')
-        print(['0x{:02x}'.format(m_) for m_ in message])
-        print('Ciphert: ', end='')
-        print(['0x{:02x}'.format(e_) for e_ in e])
+   
+    # AUT64 decrypt
+    d  = decrypt(e, key_reg, pbox_inv, sbox_inv, nRounds, verbose)
+    print('Decrypted: ', end='')
+    print(['0x{:02x}'.format(s_) for s_ in d])
